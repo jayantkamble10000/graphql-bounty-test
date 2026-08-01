@@ -1,0 +1,40 @@
+name: Runtime Token Exposure Probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check env in bash BEFORE any toolkit action runs
+        run: |
+          echo "ACTIONS_RUNTIME_TOKEN in bash: $([ -n "$ACTIONS_RUNTIME_TOKEN" ] && echo PRESENT || echo absent)"
+          echo "ACTIONS_CACHE_URL in bash: $([ -n "$ACTIONS_CACHE_URL" ] && echo PRESENT || echo absent)"
+          echo "ACTIONS_RESULTS_URL in bash: $([ -n "$ACTIONS_RESULTS_URL" ] && echo PRESENT || echo absent)"
+
+      - name: Check via node process.env (github-script, real Node context)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log("ACTIONS_RUNTIME_TOKEN via node:", process.env.ACTIONS_RUNTIME_TOKEN ? "PRESENT len=" + process.env.ACTIONS_RUNTIME_TOKEN.length : "absent");
+            console.log("ACTIONS_CACHE_URL via node:", process.env.ACTIONS_CACHE_URL || "absent");
+            console.log("ACTIONS_RESULTS_URL via node:", process.env.ACTIONS_RESULTS_URL || "absent");
+            console.log("ACTIONS_RUNTIME_URL via node:", process.env.ACTIONS_RUNTIME_URL || "absent");
+            const keys = Object.keys(process.env).filter(k => k.startsWith('ACTIONS_'));
+            console.log("All ACTIONS_ env keys visible to node:", JSON.stringify(keys));
+
+      - name: Trigger a cache action, THEN immediately re-check bash env
+        uses: actions/cache/save@v4
+        with:
+          path: .
+          key: probe-noop-${{ github.run_id }}-${{ github.run_attempt }}
+        continue-on-error: true
+
+      - name: Check env AFTER a toolkit cache action has run
+        run: |
+          echo "ACTIONS_RUNTIME_TOKEN after cache action: $([ -n "$ACTIONS_RUNTIME_TOKEN" ] && echo PRESENT || echo absent)"
+          env | grep -E '^ACTIONS_' | sed -E 's/(TOKEN=).*/\1[present-but-redacted]/'
