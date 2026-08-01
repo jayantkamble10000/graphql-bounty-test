@@ -1,0 +1,91 @@
+name: Cache Scope Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'write or restore'
+        required: true
+        default: 'write'
+      key:
+        description: 'cache key to use'
+        required: true
+        default: 'ctest-main-v1'
+      restore_keys:
+        description: 'restore-keys prefix (newline sep not supported via input; single prefix)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cache-op:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show branch/ref context
+        run: |
+          echo "ref: $GITHUB_REF"
+          echo "ref_name: $GITHUB_REF_NAME"
+          echo "event: $GITHUB_EVENT_NAME"
+          echo "sha: $GITHUB_SHA"
+          mkdir -p cache-dir
+          echo "payload-from-${GITHUB_REF_NAME}-run-${GITHUB_RUN_ID}" > cache-dir/payload.txt
+
+      - name: Decode ACTIONS_RUNTIME_TOKEN claims
+        run: |
+          T="$ACTIONS_RUNTIME_TOKEN"
+          if [ -z "$T" ]; then echo "ACTIONS_RUNTIME_TOKEN not set"; exit 0; fi
+          PAYLOAD=$(echo "$T" | cut -d. -f2)
+          MOD=$(( ${#PAYLOAD} % 4 ))
+          if [ $MOD -eq 2 ]; then PAYLOAD="${PAYLOAD}=="; elif [ $MOD -eq 3 ]; then PAYLOAD="${PAYLOAD}="; fi
+          echo "--- ACTIONS_RUNTIME_TOKEN claims ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq . || echo "$PAYLOAD" | base64 -d
+          echo "--- ACTIONS_CACHE_URL ---"
+          echo "$ACTIONS_CACHE_URL"
+          echo "--- ACTIONS_RESULTS_URL ---"
+          echo "$ACTIONS_RESULTS_URL"
+
+      - name: actions/cache (restore or save based on mode)
+        if: ${{ inputs.mode == 'write' }}
+        uses: actions/cache/save@v4
+        with:
+          path: cache-dir
+          key: ${{ inputs.key }}
+
+      - name: actions/cache restore
+        if: ${{ inputs.mode == 'restore' }}
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: cache-dir
+          key: ${{ inputs.key }}
+          restore-keys: |
+            ${{ inputs.restore_keys }}
+
+      - name: Show restored content
+        if: ${{ inputs.mode == 'restore' }}
+        run: |
+          echo "cache-hit: ${{ steps.restore.outputs.cache-hit }}"
+          echo "matched-key: ${{ steps.restore.outputs.cache-matched-key }}"
+          echo "--- content ---"
+          cat cache-dir/payload.txt 2>&1 || echo "NO FILE"
+
+      - name: List caches via API (Actions cache list)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "--- gh actions-cache list ---"
+          curl -s -H "Authorization: bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" | jq .
+
+      - name: Try raw cache service API directly with ACTIONS_RUNTIME_TOKEN (v2 twirp)
+        run: |
+          echo "Testing raw cache backend host: $ACTIONS_RESULTS_URL"
+          # Attempt to hit an unrelated Actions service (Artifacts) with the runtime token to probe scope breadth
+          curl -s -o /dev/null -w "artifact-service-status:%{http_code}\n" \
+            -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST "${ACTIONS_RESULTS_URL}twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts" \
+            -d '{"workflowRunBackendId":"'"$GITHUB_RUN_ID"'","workflowJobRunBackendId":"1"}' || true

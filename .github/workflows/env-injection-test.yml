@@ -1,0 +1,44 @@
+name: Environment Claim Injection Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: 'Dynamic environment name to test for claim injection'
+        required: true
+        default: 'production'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env_name }}
+    steps:
+      - name: Show resolved environment context
+        run: |
+          echo "Requested env_name input: ${{ inputs.env_name }}"
+          echo "github.environment (from context, if exposed): ${{ job.environment || 'n/a' }}"
+      - name: Mint OIDC token and dump sub claim raw
+        run: |
+          RESP=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=injection-test")
+          TOKEN=$(echo "$RESP" | jq -r '.value // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "NO TOKEN. Raw: $RESP"
+            exit 0
+          fi
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          MOD=$(( ${#PAYLOAD} % 4 ))
+          if [ $MOD -eq 2 ]; then PAYLOAD="${PAYLOAD}=="; elif [ $MOD -eq 3 ]; then PAYLOAD="${PAYLOAD}="; fi
+          echo "--- RAW SUB CLAIM (byte-inspectable) ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq -r '.sub' | xxd | head -20
+          echo "--- SUB CLAIM (plain) ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq -r '.sub'
+          echo "--- environment claim ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq -r '.environment'
+          echo "--- environment_node_id claim ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq -r '.environment_node_id'
+          echo "--- FULL JSON ---"
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq .
