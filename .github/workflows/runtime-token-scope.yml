@@ -1,0 +1,50 @@
+name: Runtime Token Scope Probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decode ACTIONS_RUNTIME_TOKEN claims + probe Artifact service scope
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const [h, p] = token.split('.');
+            const pad = s => s + '='.repeat((4 - s.length % 4) % 4);
+            const payload = JSON.parse(Buffer.from(pad(p), 'base64').toString('utf8'));
+            console.log("--- ACTIONS_RUNTIME_TOKEN claims ---");
+            console.log(JSON.stringify(payload, null, 2));
+
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            console.log("--- Probing ArtifactService.ListArtifacts with this token ---");
+            const resp = await fetch(resultsUrl + "twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ workflowRunBackendId: String(process.env.GITHUB_RUN_ID), workflowJobRunBackendId: "00000000-0000-0000-0000-000000000000" })
+            });
+            console.log("ArtifactService status:", resp.status);
+            const txt = await resp.text();
+            console.log("ArtifactService body (first 500 chars):", txt.slice(0,500));
+
+            console.log("--- Probing CacheService (twirp) directly with this token ---");
+            const cacheUrl = process.env.ACTIONS_RESULTS_URL;
+            const resp2 = await fetch(cacheUrl + "twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ key: "ctest-main-v1", restoreKeys: ["ctest-main-v1"], version: "" })
+            });
+            console.log("CacheService status:", resp2.status);
+            const txt2 = await resp2.text();
+            console.log("CacheService body (first 800 chars):", txt2.slice(0,800));
