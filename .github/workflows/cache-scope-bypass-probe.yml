@@ -1,0 +1,50 @@
+name: Cache Scope Server-Side Enforcement Probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Direct CacheService call for a key that only exists on a DIFFERENT branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const [, p] = token.split('.');
+            const pad = s => s + '='.repeat((4 - s.length % 4) % 4);
+            const claims = JSON.parse(Buffer.from(pad(p), 'base64').toString('utf8'));
+            console.log("Token 'ac' (authorized scope) claim:", claims.ac);
+            console.log("Running on ref:", process.env.GITHUB_REF);
+
+            const cacheUrl = process.env.ACTIONS_RESULTS_URL;
+
+            async function tryGet(key, version, label) {
+              const resp = await fetch(cacheUrl + "twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL", {
+                method: "POST",
+                headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+                body: JSON.stringify({ key, restoreKeys: [key], version })
+              });
+              const txt = await resp.text();
+              console.log(`--- ${label} --- status=${resp.status} body=${txt.slice(0,300)}`);
+              return { status: resp.status, txt };
+            }
+
+            // 1. In-scope: key that exists on refs/heads/main (should succeed / ok:true)
+            await tryGet("ctest-main-v1", "6ece7014ac0a083ec1f64b83a0d3504866990743b082191156736f3c55befa75", "IN-SCOPE key on refs/heads/main");
+
+            // 2. Out-of-scope: key that ONLY exists on refs/heads/feature-branch-A, requested while token is scoped to refs/heads/main
+            await tryGet("ctest-featureA-secret-v1", "6ece7014ac0a083ec1f64b83a0d3504866990743b082191156736f3c55befa75", "OUT-OF-SCOPE key (feature-branch-A only) requested from main-scoped token");
+
+            // 3. Also try listing/query without exact key, generic restore-keys prefix, to see if server enumerates cross-scope
+            const resp3 = await fetch(cacheUrl + "twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL", {
+              method: "POST",
+              headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+              body: JSON.stringify({ key: "nonexistent-xyz", restoreKeys: ["ctest-"], version: "6ece7014ac0a083ec1f64b83a0d3504866990743b082191156736f3c55befa75" })
+            });
+            const txt3 = await resp3.text();
+            console.log(`--- restore-keys prefix 'ctest-' via raw API --- status=${resp3.status} body=${txt3.slice(0,400)}`);
