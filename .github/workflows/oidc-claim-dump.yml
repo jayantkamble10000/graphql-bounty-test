@@ -1,0 +1,85 @@
+name: OIDC Claim Dump
+
+on:
+  workflow_dispatch:
+    inputs:
+      audience:
+        description: 'OIDC audience to request'
+        required: false
+        default: 'https://github.com/jayantkamble10000'
+  pull_request:
+  push:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  dump-claims:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Dump full runtime env relevant to OIDC/cache
+        run: |
+          echo "=== GITHUB CONTEXT (env vars) ==="
+          env | grep -E '^GITHUB_|^RUNNER_|^ACTIONS_' | sort | sed 's/\(TOKEN[^=]*=\).*/\1[REDACTED-LOGGED-SEPARATELY]/'
+          echo ""
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo yes || echo no)"
+          echo "ACTIONS_CACHE_URL set: $([ -n "$ACTIONS_CACHE_URL" ] && echo yes || echo no); value_host_only=$(echo "$ACTIONS_CACHE_URL" | sed -E 's#(https://[^/]+/).*#\1#')"
+          echo "ACTIONS_RUNTIME_URL set: $([ -n "$ACTIONS_RUNTIME_URL" ] && echo yes || echo no); value_host_only=$(echo "$ACTIONS_RUNTIME_URL" | sed -E 's#(https://[^/]+/).*#\1#')"
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+
+      - name: Mint OIDC token (default audience) and decode claims
+        run: |
+          set -e
+          AUD="${{ inputs.audience || 'https://github.com/jayantkamble10000' }}"
+          echo "Requesting OIDC token with audience: $AUD"
+          RESP=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD")
+          TOKEN=$(echo "$RESP" | jq -r '.value')
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "FAILED to get token. Raw response:"
+            echo "$RESP"
+            exit 0
+          fi
+          echo "--- JWT HEADER ---"
+          echo "$TOKEN" | cut -d. -f1 | base64 -d 2>/dev/null | jq . || echo "$TOKEN" | cut -d. -f1 | sed 's/$/==/' | base64 -d 2>/dev/null
+          echo "--- JWT PAYLOAD (ALL CLAIMS) ---"
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          # pad base64
+          MOD=$(( ${#PAYLOAD} % 4 ))
+          if [ $MOD -eq 2 ]; then PAYLOAD="${PAYLOAD}=="; elif [ $MOD -eq 3 ]; then PAYLOAD="${PAYLOAD}="; fi
+          echo "$PAYLOAD" | base64 -d 2>/dev/null | jq . || echo "$PAYLOAD" | base64 -d
+          echo "--- END CLAIMS ---"
+
+      - name: Mint OIDC token (alternate/generic audience) and decode
+        run: |
+          set -e
+          for AUD in "sigstore" "npm:registry.npmjs.org" "api.github.com" ""; do
+            echo "===== Audience: '$AUD' ====="
+            if [ -z "$AUD" ]; then
+              RESP=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL")
+            else
+              RESP=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD")
+            fi
+            TOKEN=$(echo "$RESP" | jq -r '.value // empty')
+            if [ -z "$TOKEN" ]; then
+              echo "no token: $RESP"
+              continue
+            fi
+            PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+            MOD=$(( ${#PAYLOAD} % 4 ))
+            if [ $MOD -eq 2 ]; then PAYLOAD="${PAYLOAD}=="; elif [ $MOD -eq 3 ]; then PAYLOAD="${PAYLOAD}="; fi
+            echo "$PAYLOAD" | base64 -d 2>/dev/null | jq -c '{aud, sub, repository, repository_owner, repository_id, repository_owner_id, job_workflow_ref, ref, ref_type, environment, environment_node_id, run_id, runner_environment, event_name, head_ref, base_ref, actor, actor_id, workflow_ref, iss}'
+          done
+
+      - name: Show effective OIDC customization settings via API (using GITHUB_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "=== oidc/customization/sub (requires admin:read on GITHUB_TOKEN - likely 403) ==="
+          curl -s -H "Authorization: bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/oidc/customization/sub" | jq . || true
